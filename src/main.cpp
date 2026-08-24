@@ -28,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cwctype>
 #include <cstdio>
 #include <cstring>
@@ -52,12 +53,14 @@
 namespace {
 
 // 程序自身版本（与 installer.iss 的 #define MyAppVersion 保持一致）。
-constexpr auto kAppVersion = L"1.1.0";
+constexpr auto kAppVersion = L"1.1.1";
 // GitHub Releases 更新源（owner/repo）。
 constexpr auto kUpdateOwner = L"J1ANGJIANG";
 constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
 constexpr auto kInstallerAssetPrefix = "ImmersiveTopTaskbar-Setup-";
 constexpr auto kInstallerAssetSuffix = ".exe";
+constexpr auto kFeedbackEmail = L"jianghongfu123@gmail.com";
+constexpr auto kFeedbackIssueTitle = L"用户反馈";
 
 constexpr UINT_PTR kStateTimer = 1;
 constexpr UINT_PTR kAnimTimer = 2;
@@ -82,6 +85,13 @@ constexpr DWORD kShellThemeFastSwitchCooldownMs = 80;
 constexpr DWORD kShellThemeSettleDelayMs = 180;
 constexpr int kSettingsNeutralDriftDistance2 = 64;
 constexpr int kTrayIconId = 100;
+constexpr int kTrayMenuCheckUpdate = 1;
+constexpr int kTrayMenuFeedback = 2;
+constexpr int kTrayMenuAbout = 3;
+constexpr int kTrayMenuExit = 4;
+constexpr int kFeedbackEditId = 2101;
+constexpr int kFeedbackSubmitId = 2102;
+constexpr int kFeedbackCancelId = 2103;
 constexpr int kSeamCoverHeightInactive = 0;
 constexpr int kSeamCoverHeightActive = 0;
 
@@ -228,6 +238,7 @@ void RestoreTtbManagedAppearancesOnce();
 void RestoreShellThemeIfNoTintedTaskbars();
 void ForceRestoreShellThemeNow(const char *reason);
 void ShowDonation();
+void ShowFeedback(HWND owner);
 
 std::string Narrow(const std::wstring &value) {
     if (value.empty()) {
@@ -253,6 +264,31 @@ std::wstring Widen(const std::string &value) {
     std::wstring out(static_cast<size_t>(size - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), -1, out.data(), size);
     return out;
+}
+
+std::wstring PercentEncodeUtf8(const std::wstring &value) {
+    const std::string utf8 = Narrow(value);
+    constexpr wchar_t hex[] = L"0123456789ABCDEF";
+    std::wstring out;
+    out.reserve(utf8.size() * 3);
+    for (unsigned char ch : utf8) {
+        const bool keep =
+            std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~';
+        if (keep) {
+            out.push_back(static_cast<wchar_t>(ch));
+        } else {
+            out.push_back(L'%');
+            out.push_back(hex[(ch >> 4) & 0x0F]);
+            out.push_back(hex[ch & 0x0F]);
+        }
+    }
+    return out;
+}
+
+bool HasVisibleText(const std::wstring &value) {
+    return std::any_of(value.begin(), value.end(), [](wchar_t ch) {
+        return !std::iswspace(static_cast<wint_t>(ch));
+    });
 }
 
 void Log(const std::string &line) {
@@ -3799,6 +3835,30 @@ std::wstring ReleasesLatestUrl() {
     return std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest";
 }
 
+std::wstring RepositoryIssuesNewUrl(const std::wstring &body) {
+    return std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo +
+           L"/issues/new?title=" + PercentEncodeUtf8(kFeedbackIssueTitle) +
+           L"&body=" + PercentEncodeUtf8(body);
+}
+
+std::wstring FeedbackBody(const std::wstring &text) {
+    return std::wstring(L"反馈内容：\r\n") + text +
+           L"\r\n\r\n---\r\n版本：ImmersiveTopTaskbar " + kAppVersion +
+           L"\r\n系统：Windows 11\r\n";
+}
+
+std::wstring FeedbackSubmitTarget(const std::wstring &text, bool &usesEmail) {
+    const std::wstring body = FeedbackBody(text);
+    if (wcslen(kFeedbackEmail) > 0) {
+        usesEmail = true;
+        return std::wstring(L"mailto:") + kFeedbackEmail +
+               L"?subject=" + PercentEncodeUtf8(std::wstring(L"ImmersiveTopTaskbar ") + kFeedbackIssueTitle) +
+               L"&body=" + PercentEncodeUtf8(body);
+    }
+    usesEmail = false;
+    return RepositoryIssuesNewUrl(body);
+}
+
 // 从 GitHub Releases latest 拿 tag_name；失败返回空串。
 std::wstring FetchLatestReleaseTag() {
     const std::wstring path =
@@ -4190,24 +4250,176 @@ void ShowDonation() {
     }
 }
 
+struct FeedbackWindowState {
+    HWND edit = nullptr;
+};
+
+std::wstring GetWindowTextValue(HWND hwnd) {
+    const int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0) {
+        return {};
+    }
+    std::wstring value(static_cast<size_t>(len + 1), L'\0');
+    GetWindowTextW(hwnd, value.data(), len + 1);
+    value.resize(wcslen(value.c_str()));
+    return value;
+}
+
+bool SubmitFeedback(HWND hwnd, FeedbackWindowState *state) {
+    if (!state || !state->edit) {
+        return false;
+    }
+    const std::wstring text = GetWindowTextValue(state->edit);
+    if (!HasVisibleText(text)) {
+        MessageBoxW(hwnd, L"先写一点反馈内容吧。", L"意见反馈", MB_OK | MB_ICONINFORMATION);
+        SetFocus(state->edit);
+        return false;
+    }
+
+    bool usesEmail = false;
+    const std::wstring target = FeedbackSubmitTarget(text, usesEmail);
+    if (!usesEmail) {
+        const int choice = MessageBoxW(
+            hwnd,
+            L"此开源构建还没有配置反馈邮箱，将改为打开 GitHub Issues 页面。\r\n\r\n"
+            L"提交前请检查内容，避免带上窗口标题、本地路径或其他隐私信息。",
+            L"意见反馈",
+            MB_OKCANCEL | MB_ICONINFORMATION);
+        if (choice != IDOK) {
+            return false;
+        }
+    } else {
+        MessageBoxW(
+            hwnd,
+            L"将打开你的默认邮件客户端，收件人、标题和内容会自动填好。\r\n\r\n"
+            L"请在邮件客户端里确认发送。",
+            L"意见反馈",
+            MB_OK | MB_ICONINFORMATION);
+    }
+
+    if (!OpenShellTarget(target)) {
+        MessageBoxW(hwnd, L"没有打开反馈提交入口，请检查默认邮件客户端或浏览器设置。", L"意见反馈",
+                    MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    DestroyWindow(hwnd);
+    return true;
+}
+
+LRESULT CALLBACK FeedbackWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto *state = reinterpret_cast<FeedbackWindowState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto *cs = reinterpret_cast<CREATESTRUCTW *>(lparam);
+        state = reinterpret_cast<FeedbackWindowState *>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+        HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        HWND label = CreateWindowExW(0, L"STATIC",
+                                     L"写下你遇到的问题或建议，提交前请避免填写隐私信息。",
+                                     WS_CHILD | WS_VISIBLE,
+                                     18, 18, 466, 24,
+                                     hwnd, nullptr, g_instance, nullptr);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+                                          ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+                                      18, 48, 466, 218,
+                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFeedbackEditId)), g_instance, nullptr);
+        HWND submit = CreateWindowExW(0, L"BUTTON", L"提交反馈",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                      294, 284, 92, 30,
+                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFeedbackSubmitId)), g_instance, nullptr);
+        HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                      394, 284, 90, 30,
+                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFeedbackCancelId)), g_instance, nullptr);
+        SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(state->edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(submit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(state->edit, EM_SETLIMITTEXT, 3000, 0);
+        SetFocus(state->edit);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wparam) == kFeedbackSubmitId) {
+            SubmitFeedback(hwnd, state);
+            return 0;
+        }
+        if (LOWORD(wparam) == kFeedbackCancelId) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void ShowFeedback(HWND owner) {
+    auto *state = new FeedbackWindowState;
+    constexpr wchar_t kFeedbackClass[] = L"ImmersiveTopTaskbarFeedbackWindow";
+    WNDCLASSW wc {};
+    wc.lpfnWndProc = FeedbackWndProc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = kFeedbackClass;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(g_instance, MAKEINTRESOURCE(IDI_MAIN_ICON));
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kFeedbackClass,
+        L"意见反馈",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        526,
+        370,
+        owner,
+        nullptr,
+        g_instance,
+        state);
+    if (!hwnd) {
+        delete state;
+        MessageBoxW(owner, L"反馈窗口创建失败。", L"意见反馈", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+}
+
 void ShowTrayMenu(HWND hwnd) {
     POINT pt {};
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"检查更新");
-    AppendMenuW(menu, MF_STRING, 2, L"关于");
+    AppendMenuW(menu, MF_STRING, kTrayMenuCheckUpdate, L"检查更新");
+    AppendMenuW(menu, MF_STRING, kTrayMenuFeedback, L"意见反馈");
+    AppendMenuW(menu, MF_STRING, kTrayMenuAbout, L"关于");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 3, L"退出");
+    AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"退出");
     SetForegroundWindow(hwnd);
     const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
-    if (cmd == 1) {
+    if (cmd == kTrayMenuCheckUpdate) {
         CheckForUpdates(true);
-    } else if (cmd == 2) {
+    } else if (cmd == kTrayMenuFeedback) {
+        ShowFeedback(hwnd);
+    } else if (cmd == kTrayMenuAbout) {
         std::wstring about = L"ImmersiveTopTaskbar " + std::wstring(kAppVersion) +
                              L"\r\n\r\n最大化窗口时让顶部任务栏沉浸着色。";
         MessageBoxW(hwnd, about.c_str(), L"关于 ImmersiveTopTaskbar", MB_OK | MB_ICONINFORMATION);
-    } else if (cmd == 3) {
+    } else if (cmd == kTrayMenuExit) {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
     }
 }

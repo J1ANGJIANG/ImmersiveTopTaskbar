@@ -5,7 +5,7 @@
 ;   - Start Menu / Desktop shortcuts + uninstaller
 
 #define MyAppName "ImmersiveTopTaskbar"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "ImmersiveTopTaskbar"
 #define MyAppExeName "ImmersiveTopTaskbar.exe"
 
