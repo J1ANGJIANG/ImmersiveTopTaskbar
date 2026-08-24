@@ -238,6 +238,8 @@ void RestoreShellThemeIfNoTintedTaskbars();
 void ForceRestoreShellThemeNow(const char *reason);
 void ShowDonation();
 void ShowFeedback(HWND owner);
+bool EnsureGdiPlus();
+Gdiplus::Bitmap *LoadPngBitmapResource(int resourceId);
 
 std::string Narrow(const std::wstring &value) {
     if (value.empty()) {
@@ -3883,7 +3885,6 @@ enum UpdateDialogAction {
     kUpdateDialogCancel = 0,
     kUpdateDialogAutoInstall = 1001,
     kUpdateDialogOpenGithub = 1002,
-    kUpdateDialogDonate = 1003,
 };
 
 bool FetchLatestReleaseInfo(LatestReleaseInfo &info) {
@@ -3920,78 +3921,205 @@ std::filesystem::path UpdateDownloadPath(const LatestReleaseInfo &info) {
     return LocalAppDataDirectory() / L"ImmersiveTopTaskbar" / L"Updates" / fileName;
 }
 
-HRESULT ShowTaskDialogIfAvailable(const TASKDIALOGCONFIG &cfg, int &selected) {
-    HMODULE comctl = LoadLibraryW(L"comctl32.dll");
-    if (!comctl) {
-        return HRESULT_FROM_WIN32(GetLastError());
+struct UpdateWindowState {
+    Gdiplus::Bitmap *qr1 = nullptr;
+    Gdiplus::Bitmap *qr2 = nullptr;
+    std::wstring title;
+    std::wstring detail;
+    bool newer = false;
+    bool fetchFailed = false;
+    bool canAutoInstall = false;
+    int choice = kUpdateDialogCancel;
+};
+
+LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_CREATE) {
+        auto *cs = reinterpret_cast<CREATESTRUCTW *>(lparam);
+        auto *state = reinterpret_cast<UpdateWindowState *>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+        HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        const int buttonY = state->newer ? 466 : 466;
+        if (state->newer) {
+            HWND autoButton = CreateWindowExW(0, L"BUTTON", L"下载更新",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                             236, buttonY, 116, 32,
+                                             hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogAutoInstall)),
+                                             g_instance, nullptr);
+            HWND githubButton = CreateWindowExW(0, L"BUTTON", L"去 GitHub 下载",
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                               364, buttonY, 128, 32,
+                                               hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogOpenGithub)),
+                                               g_instance, nullptr);
+            HWND cancelButton = CreateWindowExW(0, L"BUTTON", L"取消",
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                               504, buttonY, 82, 32,
+                                               hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogCancel)),
+                                               g_instance, nullptr);
+            EnableWindow(autoButton, state->canAutoInstall ? TRUE : FALSE);
+            SendMessageW(autoButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SendMessageW(githubButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SendMessageW(cancelButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        } else {
+            HWND githubButton = nullptr;
+            if (state->fetchFailed) {
+                githubButton = CreateWindowExW(0, L"BUTTON", L"去 GitHub 查看",
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                               348, buttonY, 130, 32,
+                                               hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogOpenGithub)),
+                                               g_instance, nullptr);
+            }
+            HWND closeButton = CreateWindowExW(0, L"BUTTON", L"关闭",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | (state->fetchFailed ? 0 : BS_DEFPUSHBUTTON),
+                                              state->fetchFailed ? 492 : 466, buttonY, 94, 32,
+                                              hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogCancel)),
+                                              g_instance, nullptr);
+            if (githubButton) {
+                SendMessageW(githubButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+            SendMessageW(closeButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        }
+        return 0;
     }
-    using TaskDialogIndirectProc = HRESULT(WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
-    auto proc = reinterpret_cast<TaskDialogIndirectProc>(GetProcAddress(comctl, "TaskDialogIndirect"));
-    if (!proc) {
-        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
-        FreeLibrary(comctl);
-        return hr;
+    auto *state = reinterpret_cast<UpdateWindowState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.Clear(Gdiplus::Color(255, 248, 250, 252));
+
+        RECT rc {};
+        GetClientRect(hwnd, &rc);
+        Gdiplus::FontFamily family(L"Microsoft YaHei UI");
+        Gdiplus::Font titleFont(&family, 22.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font bodyFont(&family, 14.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 24, 31, 42));
+        Gdiplus::SolidBrush bodyBrush(Gdiplus::Color(255, 70, 78, 92));
+        Gdiplus::StringFormat centered;
+        centered.SetAlignment(Gdiplus::StringAlignmentCenter);
+        centered.SetLineAlignment(Gdiplus::StringAlignmentNear);
+
+        if (state) {
+            Gdiplus::RectF titleRect(24.0f, 24.0f, static_cast<Gdiplus::REAL>(rc.right - 48), 32.0f);
+            g.DrawString(state->title.c_str(), -1, &titleFont, titleRect, &centered, &titleBrush);
+            Gdiplus::RectF detailRect(36.0f, 62.0f, static_cast<Gdiplus::REAL>(rc.right - 72), 72.0f);
+            g.DrawString(state->detail.c_str(), -1, &bodyFont, detailRect, &centered, &bodyBrush);
+
+            const int gap = 28;
+            const int qrSize = 210;
+            const int total = qrSize * 2 + gap;
+            const int left = std::max(24, (static_cast<int>(rc.right) - total) / 2);
+            const int top = 146;
+            if (state->qr1) {
+                g.DrawImage(state->qr1, left, top, qrSize, qrSize);
+            }
+            if (state->qr2) {
+                g.DrawImage(state->qr2, left + qrSize + gap, top, qrSize, qrSize);
+            }
+            Gdiplus::RectF hintRect(0.0f, static_cast<Gdiplus::REAL>(top + qrSize + 18),
+                                    static_cast<Gdiplus::REAL>(rc.right), 24.0f);
+            g.DrawString(L"二维码仅用于自愿支持，不影响任何功能。", -1, &bodyFont, hintRect, &centered, &bodyBrush);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
     }
-    const HRESULT hr = proc(&cfg, &selected, nullptr, nullptr);
-    FreeLibrary(comctl);
-    return hr;
+    case WM_COMMAND:
+        if (state) {
+            const int id = LOWORD(wparam);
+            if (id == kUpdateDialogAutoInstall || id == kUpdateDialogOpenGithub || id == kUpdateDialogCancel) {
+                state->choice = id;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state) {
+            delete state->qr1;
+            delete state->qr2;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer) {
-    const std::wstring mainInstruction =
-        newer ? L"检测到 ImmersiveTopTaskbar 新版本" : L"ImmersiveTopTaskbar 已是最新版本";
-    const std::wstring content =
-        L"当前版本：" + std::wstring(kAppVersion) +
-        L"\r\n最新版本：" + (info.tag.empty() ? L"未知" : info.tag) +
-        L"\r\n\r\n你可以自动下载安装包，也可以去 GitHub 手动下载安装。";
-
-    const std::wstring autoText =
-        info.installerUrl.empty()
-            ? L"自动下载安装包\n当前 Release 没有找到可下载的安装包附件"
-            : L"自动下载安装包\n下载 GitHub Release 附件，下载完成后由你确认启动安装器";
-    const std::wstring githubText =
-        L"去 GitHub 手动安装\n打开 Releases 页面，自行下载安装包";
-    const std::wstring donateText =
-        L"支持作者\n打开捐赠二维码";
-    const std::wstring cancelText = L"取消\n稍后再说";
-
-    TASKDIALOG_BUTTON buttons[] = {
-        { kUpdateDialogAutoInstall, autoText.c_str() },
-        { kUpdateDialogOpenGithub, githubText.c_str() },
-        { kUpdateDialogDonate, donateText.c_str() },
-        { kUpdateDialogCancel, cancelText.c_str() },
-    };
-
-    TASKDIALOGCONFIG cfg {};
-    cfg.cbSize = sizeof(cfg);
-    cfg.hwndParent = g_window;
-    cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-    cfg.pszWindowTitle = L"ImmersiveTopTaskbar 更新";
-    cfg.pszMainInstruction = mainInstruction.c_str();
-    cfg.pszContent = content.c_str();
-    cfg.pszMainIcon = TD_INFORMATION_ICON;
-    cfg.cButtons = ARRAYSIZE(buttons);
-    cfg.pButtons = buttons;
-    cfg.nDefaultButton = info.installerUrl.empty() ? kUpdateDialogOpenGithub : kUpdateDialogAutoInstall;
-
-    int selected = kUpdateDialogCancel;
-    const HRESULT hr = ShowTaskDialogIfAvailable(cfg, selected);
-    if (SUCCEEDED(hr)) {
-        return selected;
+int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer, bool fetchFailed = false) {
+    if (!EnsureGdiPlus()) {
+        MessageBoxW(nullptr, L"更新页面初始化失败。", L"ImmersiveTopTaskbar 更新", MB_OK | MB_ICONWARNING);
+        return kUpdateDialogCancel;
     }
 
-    const int fallback = MessageBoxW(
-        nullptr,
-        (content + L"\r\n\r\n是：自动下载安装\r\n否：打开 GitHub\r\n取消：关闭").c_str(),
+    auto *state = new UpdateWindowState;
+    state->newer = newer;
+    state->fetchFailed = fetchFailed;
+    state->canAutoInstall = newer && !info.installerUrl.empty();
+    state->qr1 = LoadPngBitmapResource(IDR_DONATE_QR_1);
+    state->qr2 = LoadPngBitmapResource(IDR_DONATE_QR_2);
+    if (fetchFailed) {
+        state->title = L"暂时无法获取 GitHub 发布信息";
+        state->detail = L"可能是网络、代理、GitHub 限流或 Releases API 暂时不可用。\r\n你可以稍后重试，或打开 GitHub 手动查看。";
+    } else if (newer) {
+        state->title = L"检测到新版本";
+        state->detail = L"当前版本：" + std::wstring(kAppVersion) +
+                        L"\r\n最新版本：" + (info.tag.empty() ? L"未知" : info.tag);
+    } else {
+        state->title = L"当前已经是最新版本";
+        state->detail = L"当前版本：" + std::wstring(kAppVersion) +
+                        L"\r\n最新版本：" + (info.tag.empty() ? std::wstring(kAppVersion) : info.tag);
+    }
+
+    constexpr wchar_t kUpdateClass[] = L"ImmersiveTopTaskbarUpdateWindow";
+    WNDCLASSW wc {};
+    wc.lpfnWndProc = UpdateWndProc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = kUpdateClass;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(g_instance, MAKEINTRESOURCE(IDI_MAIN_ICON));
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kUpdateClass,
         L"ImmersiveTopTaskbar 更新",
-        MB_YESNOCANCEL | MB_ICONINFORMATION);
-    if (fallback == IDYES) {
-        return kUpdateDialogAutoInstall;
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        640,
+        550,
+        g_window,
+        nullptr,
+        g_instance,
+        state);
+    if (!hwnd) {
+        delete state->qr1;
+        delete state->qr2;
+        delete state;
+        MessageBoxW(nullptr, L"更新页面创建失败。", L"ImmersiveTopTaskbar 更新", MB_OK | MB_ICONWARNING);
+        return kUpdateDialogCancel;
     }
-    if (fallback == IDNO) {
-        return kUpdateDialogOpenGithub;
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg {};
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
-    return kUpdateDialogCancel;
+    const int choice = state->choice;
+    delete state;
+    return choice;
 }
 
 void StartAutoInstallUpdate(const LatestReleaseInfo &info) {
@@ -4034,20 +4162,13 @@ void StartAutoInstallUpdate(const LatestReleaseInfo &info) {
 }
 
 void OfferUpdateInstall(const LatestReleaseInfo &info, bool newer) {
-    for (;;) {
-        const int choice = ShowUpdateOptionsDialog(info, newer);
-        if (choice == kUpdateDialogAutoInstall) {
-            StartAutoInstallUpdate(info);
-            return;
-        }
-        if (choice == kUpdateDialogOpenGithub) {
-            OpenShellTarget(ReleasesLatestUrl());
-            return;
-        }
-        if (choice == kUpdateDialogDonate) {
-            ShowDonation();
-            continue;
-        }
+    const int choice = ShowUpdateOptionsDialog(info, newer);
+    if (choice == kUpdateDialogAutoInstall) {
+        StartAutoInstallUpdate(info);
+        return;
+    }
+    if (choice == kUpdateDialogOpenGithub) {
+        OpenShellTarget(ReleasesLatestUrl());
         return;
     }
 }
@@ -4060,11 +4181,10 @@ void CheckForUpdates(bool interactive = false) {
         LatestReleaseInfo info;
         if (!FetchLatestReleaseInfo(info)) {
             if (interactive) {
-                MessageBoxW(nullptr,
-                            L"无法获取 GitHub Releases 信息，请稍后再试，或手动打开 GitHub Releases 页面。",
-                            L"ImmersiveTopTaskbar 更新",
-                            MB_OK | MB_ICONWARNING);
-                OpenShellTarget(ReleasesLatestUrl());
+                const int choice = ShowUpdateOptionsDialog(info, false, true);
+                if (choice == kUpdateDialogOpenGithub) {
+                    OpenShellTarget(ReleasesLatestUrl());
+                }
             }
             g_updateCheckRunning = false;
             return; // 网络失败 / 仓库不存在：静默跳过。
