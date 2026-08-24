@@ -46,7 +46,6 @@
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
-#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -3921,6 +3920,23 @@ std::filesystem::path UpdateDownloadPath(const LatestReleaseInfo &info) {
     return LocalAppDataDirectory() / L"ImmersiveTopTaskbar" / L"Updates" / fileName;
 }
 
+HRESULT ShowTaskDialogIfAvailable(const TASKDIALOGCONFIG &cfg, int &selected) {
+    HMODULE comctl = LoadLibraryW(L"comctl32.dll");
+    if (!comctl) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    using TaskDialogIndirectProc = HRESULT(WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
+    auto proc = reinterpret_cast<TaskDialogIndirectProc>(GetProcAddress(comctl, "TaskDialogIndirect"));
+    if (!proc) {
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        FreeLibrary(comctl);
+        return hr;
+    }
+    const HRESULT hr = proc(&cfg, &selected, nullptr, nullptr);
+    FreeLibrary(comctl);
+    return hr;
+}
+
 int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer) {
     const std::wstring mainInstruction =
         newer ? L"检测到 ImmersiveTopTaskbar 新版本" : L"ImmersiveTopTaskbar 已是最新版本";
@@ -3959,7 +3975,7 @@ int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer) {
     cfg.nDefaultButton = info.installerUrl.empty() ? kUpdateDialogOpenGithub : kUpdateDialogAutoInstall;
 
     int selected = kUpdateDialogCancel;
-    const HRESULT hr = TaskDialogIndirect(&cfg, &selected, nullptr, nullptr);
+    const HRESULT hr = ShowTaskDialogIfAvailable(cfg, selected);
     if (SUCCEEDED(hr)) {
         return selected;
     }

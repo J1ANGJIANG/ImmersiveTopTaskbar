@@ -38,7 +38,7 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 cl /nologo /std:c++20 /EHsc /Od /Zi /W4 /utf-8 /DUNICODE /D_UNICODE /DDEBUG ^
   /Fo"%OUT%\debug_" /Fd"%PDB%" /Fe"%EXE%" ^
   "%ROOT%src\main.cpp" ^
-  user32.lib gdi32.lib shell32.lib dwmapi.lib ole32.lib oleaut32.lib advapi32.lib winhttp.lib comctl32.lib gdiplus.lib ^
+  user32.lib gdi32.lib shell32.lib dwmapi.lib ole32.lib oleaut32.lib advapi32.lib winhttp.lib gdiplus.lib ^
   /link /SUBSYSTEM:WINDOWS /DEBUG "%OUT%\app.debug.res"
 
 exit /b %errorlevel%
