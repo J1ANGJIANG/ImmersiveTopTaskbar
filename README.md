@@ -20,11 +20,11 @@ ImmersiveTopTaskbar 是一个 Windows 11 x64 托盘工具，用于顶部任务�
 
 启动后也会按当前源码设定异步检查 GitHub Releases 最新版本。该检查只访问 GitHub API、比较版本并弹出提示，不会自动下载或执行更新。
 
-发布到你的 GitHub 仓库前，请把 `src/main.cpp` 里的更新源改成你的真实仓库：
+当前更新源为：
 
 ```cpp
-constexpr auto kUpdateOwner = L"你的 GitHub 用户名或组织";
-constexpr auto kUpdateRepo = L"你的仓库名";
+constexpr auto kUpdateOwner = L"J1ANGJIANG";
+constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
 ```
 
 ## 运行

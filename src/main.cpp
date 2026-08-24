@@ -46,8 +46,8 @@ namespace {
 
 // 程序自身版本（与 installer.iss 的 #define MyAppVersion 保持一致）。
 constexpr auto kAppVersion = L"1.1.0";
-// GitHub Releases 更新源（owner/repo）。发布前改成你的真实仓库。
-constexpr auto kUpdateOwner = L"Immersion";
+// GitHub Releases 更新源（owner/repo）。
+constexpr auto kUpdateOwner = L"J1ANGJIANG";
 constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
 
 constexpr UINT_PTR kStateTimer = 1;
@@ -155,6 +155,7 @@ HWINEVENTHOOK g_minimizeHook = nullptr;
 HWINEVENTHOOK g_moveSizeHook = nullptr;
 HHOOK g_mouseHook = nullptr;
 HWND g_moveSizeWindow = nullptr;
+bool g_moveSizeTransparentMode = false;
 HWND g_minimizingWindow = nullptr;
 DWORD g_taskbarInteractionUntil = 0;
 std::map<HWND, Taskbar> g_taskbars;
@@ -424,7 +425,7 @@ bool IsShellInteractionActive(HWND hwnd) {
 
 bool IsMoveSizeHoldForTaskbar(const Taskbar &tb) {
     (void)tb;
-    return false;
+    return g_moveSizeTransparentMode && g_moveSizeWindow && IsWindow(g_moveSizeWindow);
 }
 
 bool IsTaskbarInteractionProtected() {
@@ -1958,7 +1959,7 @@ LRESULT CALLBACK SeamCoverWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
     }
 }
 
-void RestoreTaskbar(Taskbar &tb) {
+void RestoreTaskbar(Taskbar &tb, bool reassertDefault = true) {
     DestroySeamCover(tb);
     if (!IsWindow(tb.hwnd)) {
         tb.tinted = false;
@@ -1977,7 +1978,7 @@ void RestoreTaskbar(Taskbar &tb) {
     tb.restorePending = false;
     tb.restorePendingAt = 0;
     tb.animating = false;
-    tb.restoreReassertUntil = GetTickCount() + kDefaultReassertDurationMs;
+    tb.restoreReassertUntil = reassertDefault ? GetTickCount() + kDefaultReassertDurationMs : 0;
     tb.lastRestoreReassertAt = 0;
 
     // Theme restoration must not wait behind TranslucentTB's settings refresh.
@@ -2008,7 +2009,9 @@ void RestoreTaskbar(Taskbar &tb) {
     tb.pendingSettingsTargetValid = false;
     tb.seamCoverHeight = kSeamCoverHeightInactive;
     RestoreShellThemeIfNoTintedTaskbars();
-    SetTimer(g_window, kAnimTimer, kAnimIntervalMs, nullptr);
+    if (reassertDefault) {
+        SetTimer(g_window, kAnimTimer, kAnimIntervalMs, nullptr);
+    }
 }
 
 void RestoreAllTaskbars() {
@@ -3018,11 +3021,11 @@ void EvaluateState() {
     if (g_taskbars.empty()) {
         RefreshTaskbars();
     }
-    if (g_moveSizeWindow) {
+    if (g_moveSizeTransparentMode && g_moveSizeWindow && IsWindow(g_moveSizeWindow)) {
         for (auto &[_, tb] : g_taskbars) {
             if (tb.tinted) {
                 Log("[MOVESIZE] transparent while dragging");
-                RestoreTaskbar(tb);
+                RestoreTaskbar(tb, false);
             }
         }
         return;
@@ -3326,8 +3329,22 @@ void TickAnimation() {
     const DWORD now = GetTickCount();
     const bool taskbarInteraction = IsShellInteractionActive(GetForegroundWindow()) ||
                                     IsTaskbarInteractionProtected();
+    const bool moveSizeActive =
+        g_moveSizeTransparentMode && g_moveSizeWindow && IsWindow(g_moveSizeWindow);
 
     for (auto &[_, tb] : g_taskbars) {
+        if (moveSizeActive) {
+            tb.animating = false;
+            tb.restorePending = false;
+            tb.restorePendingAt = 0;
+            if (tb.tinted) {
+                Log("[MOVESIZE] transparent during animation tick");
+                RestoreTaskbar(tb, false);
+            }
+            stillAnimating = true;
+            continue;
+        }
+
         if (!tb.tinted && static_cast<LONG>(tb.restoreReassertUntil - now) > 0) {
             if (now - tb.lastRestoreReassertAt >= kDefaultReassertIntervalMs) {
                 ReassertTaskbarDefault(tb);
@@ -3337,8 +3354,7 @@ void TickAnimation() {
             continue;
         }
 
-        const bool appearanceHold = tb.tinted &&
-                                    (taskbarInteraction || IsMoveSizeHoldForTaskbar(tb));
+        const bool appearanceHold = tb.tinted && taskbarInteraction;
         if (appearanceHold) {
             tb.animating = false;
             if (now - tb.lastAppliedAt >= kInteractionReapplyIntervalMs) {
@@ -3381,8 +3397,7 @@ void TickAnimation() {
             continue;
         }
 
-        const bool holdAppearance = tb.tinted &&
-                                    (taskbarInteraction || IsMoveSizeHoldForTaskbar(tb));
+        const bool holdAppearance = tb.tinted && taskbarInteraction;
         if (holdAppearance) {
             // Keep asserting after the click too: TranslucentTB can apply its
             // desktop state during the tail of the taskbar activation animation.
@@ -3409,16 +3424,28 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DW
             Log("[HOOK] first MOVESIZESTART received - drag protection alive");
         }
         g_moveSizeWindow = hwnd;
-        Log("[MOVESIZE] start hwnd=0x" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
+        g_moveSizeTransparentMode = IsZoomed(hwnd);
         for (auto &[_, tb] : g_taskbars) {
-            if (tb.tinted) {
+            if (hwnd && (hwnd == tb.targetWindow || hwnd == tb.lastMaximizedWindow)) {
+                g_moveSizeTransparentMode = true;
+                break;
+            }
+        }
+        Log("[MOVESIZE] start hwnd=0x" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)) +
+            " transparentMode=" + (g_moveSizeTransparentMode ? "1" : "0"));
+        for (auto &[_, tb] : g_taskbars) {
+            if (g_moveSizeTransparentMode && tb.tinted) {
                 Log("[MOVESIZE] transparent on drag start");
-                RestoreTaskbar(tb);
+                RestoreTaskbar(tb, false);
+            } else if (!g_moveSizeTransparentMode && tb.tinted) {
+                Log("[MOVESIZE] keep immersive while dragging floating window");
+                ReassertTaskbarColor(tb);
             }
         }
     } else if (event == EVENT_SYSTEM_MOVESIZEEND) {
         Log("[MOVESIZE] end hwnd=0x" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)));
         g_moveSizeWindow = nullptr;
+        g_moveSizeTransparentMode = false;
         PostMessageW(g_window, kRefreshMessage, 0, 0);
     } else if (event == EVENT_SYSTEM_MINIMIZESTART) {
         g_minimizingWindow = hwnd;
@@ -3789,6 +3816,7 @@ void UninstallHooks() {
         g_mouseHook = nullptr;
     }
     g_moveSizeWindow = nullptr;
+    g_moveSizeTransparentMode = false;
     g_taskbarInteractionUntil = 0;
 }
 
