@@ -53,7 +53,7 @@
 namespace {
 
 // 程序自身版本（与 installer.iss 的 #define MyAppVersion 保持一致）。
-constexpr auto kAppVersion = L"1.1.1";
+constexpr auto kAppVersion = L"1.1.0";
 // GitHub Releases 更新源（owner/repo）。
 constexpr auto kUpdateOwner = L"J1ANGJIANG";
 constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
