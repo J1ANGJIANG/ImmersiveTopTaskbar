@@ -1,0 +1,4 @@
+// ImmersiveTopTaskbar 图标资源
+#include "resource.h"
+
+IDI_MAIN_ICON ICON "app.ico"

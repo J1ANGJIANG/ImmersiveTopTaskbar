@@ -1,0 +1,34 @@
+# Build output
+build/
+dist/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.res
+*.exp
+*.lib
+
+# Local diagnostics
+*.log
+runtime_log.txt
+log.txt
+*.dmp
+*.tmp
+
+# Local assistant/workspace state
+.claude/
+.reasonix/
+.workbuddy/
+.vs/
+.vscode/
+
+# Local reports and probes
+CURRENT_HANDOFF_REPORT.md
+build_verify/
+screenshots/
+*.png.tmp
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
