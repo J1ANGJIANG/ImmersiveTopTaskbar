@@ -2,3 +2,5 @@
 #include "resource.h"
 
 IDI_MAIN_ICON ICON "app.ico"
+IDR_DONATE_QR_1 PNG "..\\donate\\donate-1.png"
+IDR_DONATE_QR_2 PNG "..\\donate\\donate-2.png"

@@ -16,7 +16,9 @@
 
 #include <windows.h>
 #include <dwmapi.h>
+#include <commctrl.h>
 #include <oleauto.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 #include <winhttp.h>
 
@@ -24,9 +26,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cwctype>
 #include <cstdio>
+#include <cstring>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -41,6 +45,9 @@
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
 
@@ -49,6 +56,8 @@ constexpr auto kAppVersion = L"1.1.0";
 // GitHub Releases 更新源（owner/repo）。
 constexpr auto kUpdateOwner = L"J1ANGJIANG";
 constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
+constexpr auto kInstallerAssetPrefix = "ImmersiveTopTaskbar-Setup-";
+constexpr auto kInstallerAssetSuffix = ".exe";
 
 constexpr UINT_PTR kStateTimer = 1;
 constexpr UINT_PTR kAnimTimer = 2;
@@ -190,6 +199,9 @@ DWORD g_lastShellThemeSwitchAt = 0;
 DWORD g_shellThemeSettlingUntil = 0;
 bool g_shellThemeBroadcasting = false;
 bool g_taskbarStateUpdating = false;
+std::atomic_bool g_updateCheckRunning = false;
+ULONG_PTR g_gdiplusToken = 0;
+bool g_gdiplusStarted = false;
 
 struct ScopedTaskbarStateUpdate {
     bool previous = false;
@@ -215,6 +227,7 @@ bool SyncTtbMaximizedAppearance(const Taskbar &tb, const Color &color);
 void RestoreTtbManagedAppearancesOnce();
 void RestoreShellThemeIfNoTintedTaskbars();
 void ForceRestoreShellThemeNow(const char *reason);
+void ShowDonation();
 
 std::string Narrow(const std::wstring &value) {
     if (value.empty()) {
@@ -273,6 +286,29 @@ void MarkPreflightPassed() {
         return;
     }
     file << "preflight-ok-v1\n";
+}
+
+std::filesystem::path ExecutableDirectory() {
+    wchar_t path[MAX_PATH] {};
+    const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return {};
+    }
+    return std::filesystem::path(path).parent_path();
+}
+
+std::filesystem::path LocalAppDataDirectory() {
+    wchar_t localAppData[MAX_PATH] {};
+    const DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return {};
+    }
+    return std::filesystem::path(localAppData);
+}
+
+bool OpenShellTarget(const std::wstring &target, const wchar_t *verb = L"open") {
+    HINSTANCE result = ShellExecuteW(nullptr, verb, target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<intptr_t>(result) > 32;
 }
 
 int Width(const RECT &rc) {
@@ -3512,6 +3548,77 @@ bool ExtractTagName(const std::string &json, std::string &tag) {
     return !tag.empty();
 }
 
+bool ExtractJsonStringProperty(const std::string &json, size_t start,
+                               const std::string &key, std::string &value,
+                               size_t *valueEnd = nullptr) {
+    const size_t kp = json.find(key, start);
+    if (kp == std::string::npos) {
+        return false;
+    }
+    const size_t colon = json.find(':', kp + key.size());
+    if (colon == std::string::npos) {
+        return false;
+    }
+    const size_t q1 = json.find('"', colon + 1);
+    if (q1 == std::string::npos) {
+        return false;
+    }
+    std::string out;
+    bool escaping = false;
+    for (size_t i = q1 + 1; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (escaping) {
+            out.push_back(ch);
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"') {
+            value = std::move(out);
+            if (valueEnd) {
+                *valueEnd = i + 1;
+            }
+            return true;
+        }
+        out.push_back(ch);
+    }
+    return false;
+}
+
+bool EndsWithAscii(const std::string &value, const std::string &suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool ExtractInstallerAssetUrl(const std::string &json, std::string &assetName, std::string &assetUrl) {
+    size_t pos = 0;
+    for (;;) {
+        std::string url;
+        size_t end = 0;
+        if (!ExtractJsonStringProperty(json, pos, "\"browser_download_url\"", url, &end)) {
+            return false;
+        }
+        const size_t nameSearchStart = json.rfind("\"name\"", end);
+        std::string name;
+        if (nameSearchStart != std::string::npos) {
+            ExtractJsonStringProperty(json, nameSearchStart, "\"name\"", name);
+        }
+        const bool likelyInstaller =
+            EndsWithAscii(url, kInstallerAssetSuffix) &&
+            (url.find(kInstallerAssetPrefix) != std::string::npos ||
+             name.find(kInstallerAssetPrefix) != std::string::npos);
+        if (likelyInstaller) {
+            assetName = name.empty() ? url.substr(url.find_last_of('/') + 1) : name;
+            assetUrl = url;
+            return true;
+        }
+        pos = end;
+    }
+}
+
 // 把 "v1.2.3" / "1.2.3" 归一成可比较的三元组。
 bool ParseSemver(const std::wstring &s, int &a, int &b, int &c) {
     std::wstring t = s;
@@ -3587,6 +3694,111 @@ std::string HttpGetUtf8(const std::wstring &host, const std::wstring &path) {
     return ok ? body : std::string{};
 }
 
+bool ParseHttpsUrl(const std::wstring &url, std::wstring &host, std::wstring &path) {
+    constexpr wchar_t prefix[] = L"https://";
+    if (url.rfind(prefix, 0) != 0) {
+        return false;
+    }
+    const size_t hostStart = wcslen(prefix);
+    const size_t slash = url.find(L'/', hostStart);
+    if (slash == std::wstring::npos || slash == hostStart) {
+        return false;
+    }
+    host = url.substr(hostStart, slash - hostStart);
+    path = url.substr(slash);
+    return !host.empty() && !path.empty();
+}
+
+bool HttpDownloadFile(const std::wstring &url, const std::filesystem::path &outputPath) {
+    std::wstring host;
+    std::wstring path;
+    if (!ParseHttpsUrl(url, host, path)) {
+        return false;
+    }
+
+    HINTERNET session = WinHttpOpen(L"ImmersiveTopTaskbar/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        return false;
+    }
+    HINTERNET conn = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!conn) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    HINTERNET req = WinHttpOpenRequest(conn, L"GET", path.c_str(), nullptr,
+                                       WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       WINHTTP_FLAG_SECURE);
+    if (!req) {
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    WinHttpSetOption(req, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+    WinHttpAddRequestHeaders(req, L"User-Agent: ImmersiveTopTaskbar\r\n",
+                             0xFFFFFFFF, WINHTTP_ADDREQ_FLAG_ADD);
+
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        WinHttpCloseHandle(req);
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (ok) {
+        ok = WinHttpReceiveResponse(req, nullptr);
+    }
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (ok) {
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+        ok = status >= 200 && status < 300;
+    }
+    if (ok) {
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(req, &avail) || avail == 0) {
+                break;
+            }
+            std::vector<char> buf(avail);
+            DWORD read = 0;
+            if (!WinHttpReadData(req, buf.data(), avail, &read) || read == 0) {
+                ok = false;
+                break;
+            }
+            file.write(buf.data(), read);
+            if (!file) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    file.close();
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    if (!ok) {
+        std::filesystem::remove(outputPath, ec);
+    }
+    return ok;
+}
+
+std::wstring ReleasesLatestUrl() {
+    return std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest";
+}
+
 // 从 GitHub Releases latest 拿 tag_name；失败返回空串。
 std::wstring FetchLatestReleaseTag() {
     const std::wstring path =
@@ -3602,24 +3814,380 @@ std::wstring FetchLatestReleaseTag() {
     return Widen(tag);
 }
 
-void CheckForUpdates() {
-    std::thread([&] {
-        const std::wstring latest = FetchLatestReleaseTag();
-        if (latest.empty()) {
+struct LatestReleaseInfo {
+    std::wstring tag;
+    std::wstring installerUrl;
+    std::wstring installerName;
+};
+
+enum UpdateDialogAction {
+    kUpdateDialogCancel = 0,
+    kUpdateDialogAutoInstall = 1001,
+    kUpdateDialogOpenGithub = 1002,
+    kUpdateDialogDonate = 1003,
+};
+
+bool FetchLatestReleaseInfo(LatestReleaseInfo &info) {
+    const std::wstring path =
+        std::wstring(L"/repos/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest";
+    const std::string json = HttpGetUtf8(L"api.github.com", path);
+    if (json.empty()) {
+        return false;
+    }
+    std::string tag;
+    if (!ExtractTagName(json, tag)) {
+        return false;
+    }
+    std::string assetName;
+    std::string assetUrl;
+    ExtractInstallerAssetUrl(json, assetName, assetUrl);
+    info.tag = Widen(tag);
+    info.installerName = Widen(assetName);
+    info.installerUrl = Widen(assetUrl);
+    return !info.tag.empty();
+}
+
+std::filesystem::path UpdateDownloadPath(const LatestReleaseInfo &info) {
+    std::wstring fileName = info.installerName;
+    if (fileName.empty()) {
+        fileName = L"ImmersiveTopTaskbar-Setup-" + info.tag + L".exe";
+    }
+    for (wchar_t &ch : fileName) {
+        if (ch == L'/' || ch == L'\\' || ch == L':' || ch == L'*' ||
+            ch == L'?' || ch == L'"' || ch == L'<' || ch == L'>' || ch == L'|') {
+            ch = L'_';
+        }
+    }
+    return LocalAppDataDirectory() / L"ImmersiveTopTaskbar" / L"Updates" / fileName;
+}
+
+int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer) {
+    const std::wstring mainInstruction =
+        newer ? L"检测到 ImmersiveTopTaskbar 新版本" : L"ImmersiveTopTaskbar 已是最新版本";
+    const std::wstring content =
+        L"当前版本：" + std::wstring(kAppVersion) +
+        L"\r\n最新版本：" + (info.tag.empty() ? L"未知" : info.tag) +
+        L"\r\n\r\n你可以自动下载安装包，也可以去 GitHub 手动下载安装。";
+
+    const std::wstring autoText =
+        info.installerUrl.empty()
+            ? L"自动下载安装包\n当前 Release 没有找到可下载的安装包附件"
+            : L"自动下载安装包\n下载 GitHub Release 附件，下载完成后由你确认启动安装器";
+    const std::wstring githubText =
+        L"去 GitHub 手动安装\n打开 Releases 页面，自行下载安装包";
+    const std::wstring donateText =
+        L"支持作者\n打开捐赠二维码";
+    const std::wstring cancelText = L"取消\n稍后再说";
+
+    TASKDIALOG_BUTTON buttons[] = {
+        { kUpdateDialogAutoInstall, autoText.c_str() },
+        { kUpdateDialogOpenGithub, githubText.c_str() },
+        { kUpdateDialogDonate, donateText.c_str() },
+        { kUpdateDialogCancel, cancelText.c_str() },
+    };
+
+    TASKDIALOGCONFIG cfg {};
+    cfg.cbSize = sizeof(cfg);
+    cfg.hwndParent = g_window;
+    cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    cfg.pszWindowTitle = L"ImmersiveTopTaskbar 更新";
+    cfg.pszMainInstruction = mainInstruction.c_str();
+    cfg.pszContent = content.c_str();
+    cfg.pszMainIcon = TD_INFORMATION_ICON;
+    cfg.cButtons = ARRAYSIZE(buttons);
+    cfg.pButtons = buttons;
+    cfg.nDefaultButton = info.installerUrl.empty() ? kUpdateDialogOpenGithub : kUpdateDialogAutoInstall;
+
+    int selected = kUpdateDialogCancel;
+    const HRESULT hr = TaskDialogIndirect(&cfg, &selected, nullptr, nullptr);
+    if (SUCCEEDED(hr)) {
+        return selected;
+    }
+
+    const int fallback = MessageBoxW(
+        nullptr,
+        (content + L"\r\n\r\n是：自动下载安装\r\n否：打开 GitHub\r\n取消：关闭").c_str(),
+        L"ImmersiveTopTaskbar 更新",
+        MB_YESNOCANCEL | MB_ICONINFORMATION);
+    if (fallback == IDYES) {
+        return kUpdateDialogAutoInstall;
+    }
+    if (fallback == IDNO) {
+        return kUpdateDialogOpenGithub;
+    }
+    return kUpdateDialogCancel;
+}
+
+void StartAutoInstallUpdate(const LatestReleaseInfo &info) {
+    if (info.installerUrl.empty()) {
+        MessageBoxW(nullptr,
+                    L"最新 Release 没有找到安装包附件，将打开 GitHub Releases 页面。",
+                    L"ImmersiveTopTaskbar 更新",
+                    MB_OK | MB_ICONINFORMATION);
+        OpenShellTarget(ReleasesLatestUrl());
+        return;
+    }
+
+    const std::filesystem::path outputPath = UpdateDownloadPath(info);
+    std::wstring downloading = L"即将下载：\r\n" + outputPath.wstring() +
+                               L"\r\n\r\n下载完成后会询问是否启动安装包。";
+    MessageBoxW(nullptr, downloading.c_str(), L"ImmersiveTopTaskbar 更新", MB_OK | MB_ICONINFORMATION);
+
+    if (!HttpDownloadFile(info.installerUrl, outputPath)) {
+        MessageBoxW(nullptr,
+                    L"自动下载失败，将打开 GitHub Releases 页面供你手动下载。",
+                    L"ImmersiveTopTaskbar 更新",
+                    MB_OK | MB_ICONWARNING);
+        OpenShellTarget(ReleasesLatestUrl());
+        return;
+    }
+
+    std::wstring done = L"安装包已下载：\r\n" + outputPath.wstring() +
+                        L"\r\n\r\n是否现在启动安装包？当前程序会退出以便安装器覆盖文件。";
+    if (MessageBoxW(nullptr, done.c_str(), L"ImmersiveTopTaskbar 更新",
+                    MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        if (OpenShellTarget(outputPath.wstring())) {
+            if (g_window) {
+                PostMessageW(g_window, WM_CLOSE, 0, 0);
+            }
+        } else {
+            MessageBoxW(nullptr, L"安装包启动失败，请手动打开下载文件。",
+                        L"ImmersiveTopTaskbar 更新", MB_OK | MB_ICONWARNING);
+        }
+    }
+}
+
+void OfferUpdateInstall(const LatestReleaseInfo &info, bool newer) {
+    for (;;) {
+        const int choice = ShowUpdateOptionsDialog(info, newer);
+        if (choice == kUpdateDialogAutoInstall) {
+            StartAutoInstallUpdate(info);
+            return;
+        }
+        if (choice == kUpdateDialogOpenGithub) {
+            OpenShellTarget(ReleasesLatestUrl());
+            return;
+        }
+        if (choice == kUpdateDialogDonate) {
+            ShowDonation();
+            continue;
+        }
+        return;
+    }
+}
+
+void CheckForUpdates(bool interactive = false) {
+    std::thread([interactive] {
+        if (g_updateCheckRunning.exchange(true)) {
+            return;
+        }
+        LatestReleaseInfo info;
+        if (!FetchLatestReleaseInfo(info)) {
+            if (interactive) {
+                MessageBoxW(nullptr,
+                            L"无法获取 GitHub Releases 信息，请稍后再试，或手动打开 GitHub Releases 页面。",
+                            L"ImmersiveTopTaskbar 更新",
+                            MB_OK | MB_ICONWARNING);
+                OpenShellTarget(ReleasesLatestUrl());
+            }
+            g_updateCheckRunning = false;
             return; // 网络失败 / 仓库不存在：静默跳过。
         }
         int la = 0, lb = 0, lc = 0, ca = 0, cb = 0, cc = 0;
-        if (!ParseSemver(latest, la, lb, lc) || !ParseSemver(kAppVersion, ca, cb, cc)) {
+        if (!ParseSemver(info.tag, la, lb, lc) || !ParseSemver(kAppVersion, ca, cb, cc)) {
+            g_updateCheckRunning = false;
             return;
         }
         const bool newer = (la > ca) || (la == ca && lb > cb) || (la == ca && lb == cb && lc > cc);
-        if (!newer) {
+        if (!newer && !interactive) {
+            g_updateCheckRunning = false;
             return;
         }
-        std::wstring msg = L"检测到新版本 " + latest + L"\r\n当前版本 " + kAppVersion +
-                           L"\r\n\r\n请前往 GitHub Releases 下载更新。";
-        MessageBoxW(nullptr, msg.c_str(), L"ImmersiveTopTaskbar 更新", MB_OK | MB_ICONINFORMATION);
+        OfferUpdateInstall(info, newer);
+        g_updateCheckRunning = false;
     }).detach();
+}
+
+bool EnsureGdiPlus() {
+    if (g_gdiplusStarted) {
+        return true;
+    }
+    Gdiplus::GdiplusStartupInput input;
+    if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr) != Gdiplus::Ok) {
+        return false;
+    }
+    g_gdiplusStarted = true;
+    return true;
+}
+
+Gdiplus::Bitmap *LoadPngBitmapResource(int resourceId) {
+    HRSRC resource = FindResourceW(g_instance, MAKEINTRESOURCEW(resourceId), L"PNG");
+    if (!resource) {
+        return nullptr;
+    }
+    HGLOBAL loaded = LoadResource(g_instance, resource);
+    if (!loaded) {
+        return nullptr;
+    }
+    const DWORD size = SizeofResource(g_instance, resource);
+    const void *data = LockResource(loaded);
+    if (!data || size == 0) {
+        return nullptr;
+    }
+
+    HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!copy) {
+        return nullptr;
+    }
+    void *copyData = GlobalLock(copy);
+    if (!copyData) {
+        GlobalFree(copy);
+        return nullptr;
+    }
+    std::memcpy(copyData, data, size);
+    GlobalUnlock(copy);
+
+    IStream *stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(copy, TRUE, &stream)) || !stream) {
+        GlobalFree(copy);
+        return nullptr;
+    }
+    Gdiplus::Bitmap *bitmap = Gdiplus::Bitmap::FromStream(stream);
+    stream->Release();
+    if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok) {
+        delete bitmap;
+        return nullptr;
+    }
+    return bitmap;
+}
+
+struct DonationWindowState {
+    Gdiplus::Bitmap *qr1 = nullptr;
+    Gdiplus::Bitmap *qr2 = nullptr;
+};
+
+LRESULT CALLBACK DonationWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_CREATE) {
+        auto *cs = reinterpret_cast<CREATESTRUCTW *>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return 0;
+    }
+    auto *state = reinterpret_cast<DonationWindowState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.Clear(Gdiplus::Color(255, 248, 250, 252));
+
+        RECT rc {};
+        GetClientRect(hwnd, &rc);
+        Gdiplus::FontFamily titleFamily(L"Microsoft YaHei UI");
+        Gdiplus::Font titleFont(&titleFamily, 22.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font bodyFont(&titleFamily, 14.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 24, 31, 42));
+        Gdiplus::SolidBrush bodyBrush(Gdiplus::Color(255, 70, 78, 92));
+        Gdiplus::StringFormat centered;
+        centered.SetAlignment(Gdiplus::StringAlignmentCenter);
+
+        Gdiplus::RectF titleRect(0.0f, 24.0f, static_cast<Gdiplus::REAL>(rc.right), 32.0f);
+        g.DrawString(L"支持 ImmersiveTopTaskbar", -1, &titleFont, titleRect, &centered, &titleBrush);
+        Gdiplus::RectF bodyRect(0.0f, 58.0f, static_cast<Gdiplus::REAL>(rc.right), 24.0f);
+        g.DrawString(L"喜欢这个小工具的话，可以扫码请作者喝杯咖啡。", -1, &bodyFont, bodyRect, &centered, &bodyBrush);
+
+        const int gap = 34;
+        const int qrSize = 260;
+        const int total = qrSize * 2 + gap;
+        const int left = std::max(24, (static_cast<int>(rc.right) - total) / 2);
+        const int top = 106;
+        if (state && state->qr1) {
+            g.DrawImage(state->qr1, left, top, qrSize, qrSize);
+        }
+        if (state && state->qr2) {
+            g.DrawImage(state->qr2, left + qrSize + gap, top, qrSize, qrSize);
+        }
+
+        Gdiplus::RectF hintRect(0.0f, static_cast<Gdiplus::REAL>(top + qrSize + 22),
+                                static_cast<Gdiplus::REAL>(rc.right), 24.0f);
+        g.DrawString(L"二维码仅用于自愿支持，不影响任何功能。", -1, &bodyFont, hintRect, &centered, &bodyBrush);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (state) {
+            delete state->qr1;
+            delete state->qr2;
+            delete state;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        }
+        return 0;
+    default:
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+}
+
+void ShowDonation() {
+    if (!EnsureGdiPlus()) {
+        MessageBoxW(nullptr, L"捐赠窗口初始化失败。", L"支持作者", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    auto *state = new DonationWindowState;
+    state->qr1 = LoadPngBitmapResource(IDR_DONATE_QR_1);
+    state->qr2 = LoadPngBitmapResource(IDR_DONATE_QR_2);
+    if (!state->qr1 || !state->qr2) {
+        delete state->qr1;
+        delete state->qr2;
+        delete state;
+        MessageBoxW(nullptr, L"没有找到内置捐赠二维码资源。", L"支持作者", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    constexpr wchar_t kDonationClass[] = L"ImmersiveTopTaskbarDonationWindow";
+    WNDCLASSW wc {};
+    wc.lpfnWndProc = DonationWndProc;
+    wc.hInstance = g_instance;
+    wc.lpszClassName = kDonationClass;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(g_instance, MAKEINTRESOURCE(IDI_MAIN_ICON));
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kDonationClass,
+        L"支持作者",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        660,
+        470,
+        g_window,
+        nullptr,
+        g_instance,
+        state);
+    if (!hwnd) {
+        delete state->qr1;
+        delete state->qr2;
+        delete state;
+        MessageBoxW(nullptr, L"捐赠窗口创建失败。", L"支持作者", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg {};
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 }
 
 void ShowTrayMenu(HWND hwnd) {
@@ -3634,7 +4202,7 @@ void ShowTrayMenu(HWND hwnd) {
     const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
     if (cmd == 1) {
-        CheckForUpdates();
+        CheckForUpdates(true);
     } else if (cmd == 2) {
         std::wstring about = L"ImmersiveTopTaskbar " + std::wstring(kAppVersion) +
                              L"\r\n\r\n最大化窗口时让顶部任务栏沉浸着色。";

@@ -1,0 +1,19 @@
+<svg width="980" height="620" viewBox="0 0 980 620" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Update options preview">
+  <rect width="980" height="620" fill="#f5f7fb"/>
+  <rect x="190" y="72" width="600" height="476" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="230" y="126" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="24" font-weight="700" fill="#111827">ImmersiveTopTaskbar 更新</text>
+  <text x="230" y="164" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="15" fill="#475569">当前版本：1.1.0   最新版本：v1.1.1</text>
+  <g font-family="Segoe UI, Microsoft YaHei UI, sans-serif">
+    <rect x="230" y="206" width="520" height="74" rx="8" fill="#eff6ff" stroke="#93c5fd"/>
+    <text x="254" y="236" font-size="18" font-weight="700" fill="#1d4ed8">自动下载安装包</text>
+    <text x="254" y="262" font-size="14" fill="#334155">下载 Release 附件，完成后由你确认启动安装器</text>
+    <rect x="230" y="300" width="520" height="74" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text x="254" y="330" font-size="18" font-weight="700" fill="#111827">去 GitHub 手动安装</text>
+    <text x="254" y="356" font-size="14" fill="#475569">打开 Releases 页面，自行下载安装包</text>
+    <rect x="230" y="394" width="520" height="74" rx="8" fill="#fff7ed" stroke="#fdba74"/>
+    <text x="254" y="424" font-size="18" font-weight="700" fill="#9a3412">支持作者</text>
+    <text x="254" y="450" font-size="14" fill="#475569">在检查更新页面里打开内置捐赠二维码</text>
+    <rect x="230" y="488" width="520" height="38" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="254" y="513" font-size="15" fill="#475569">取消</text>
+  </g>
+</svg>

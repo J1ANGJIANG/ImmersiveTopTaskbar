@@ -1,47 +1,75 @@
 # ImmersiveTopTaskbar
 
-ImmersiveTopTaskbar 是一个 Windows 11 x64 托盘工具，用于顶部任务栏沉浸显示。当前前台窗口最大化时，它会根据窗口状态和采样颜色调整真实任务栏外观，让顶部任务栏更贴近当前窗口。
+让 Windows 11 的顶部任务栏真正融进当前最大化窗口里。
 
-请先阅读 [PRIVACY.md](PRIVACY.md) 和 [SECURITY.md](SECURITY.md)，尤其是注册表、TranslucentTB 配置和本地日志相关说明。
+![顶部任务栏沉浸效果](docs/images/taskbar-immersive.svg)
+
+ImmersiveTopTaskbar 是一个轻量托盘工具。它适合把任务栏放在屏幕顶部、又喜欢干净沉浸视觉的人：窗口最大化时，任务栏会跟随窗口颜色；回到桌面、拖动窗口或切换应用时，任务栏会尽量自然地恢复或保持当前状态。
+
+## 它能做什么
+
+- 顶部任务栏随最大化窗口自动沉浸着色。
+- 浅色窗口下自动照顾系统托盘图标可见性。
+- 前景小窗口覆盖在最大化窗口上时，仍保持后台最大化窗口的沉浸感。
+- 拖动最大化窗口本身时切回透明，避免窗口移动时任务栏抢色闪烁。
+- 提供托盘菜单、启动环境检测、退出恢复和 GitHub Releases 更新检查。
+
+## 更新方式
+
+托盘菜单点击“检查更新”后，会出现一个选择页：
+
+![检查更新选择页](docs/images/update-options.svg)
+
+- **自动下载安装包**：从 GitHub Release 下载安装包，下载完成后再由你确认是否启动安装器。
+- **去 GitHub 手动安装**：打开 Releases 页面，自己下载。
+- **支持作者**：打开程序内置的捐赠二维码窗口。
+
+程序不会静默安装更新，也不会自动执行远程代码。
 
 ## 安装须知
 
-- 安装器默认安装到 `D:\ImmersiveTopTaskbar`。
+- 默认安装到 `D:\ImmersiveTopTaskbar`。
 - 安装器默认勾选“开机自动启动”。
-- 安装完成后可选择立即运行。
-- 程序不要求管理员权限。
-- 程序依赖 TranslucentTB，并通过其 ExplorerTAP 组件应用任务栏外观。
+- 不需要管理员权限。
+- 依赖 Microsoft Store 版 TranslucentTB，并通过 ExplorerTAP 应用任务栏外观。
 
-这些是当前发行设定，开源版没有改动。
+第一次运行会显示使用须知和环境检测。检测通过后，后续启动会静默检测；只有缺少必要环境时才会弹窗提示。
 
-## 启动检测
+## 隐私和安全
 
-程序启动时会进行运行环境检测，包括 TranslucentTB / ExplorerTAP 可用性、任务栏位置和相关外观状态。检测通过后会尽量减少重复提示。
+这个工具是本地程序。它不会上传你的窗口标题、截图或个人文件。
 
-启动后也会按当前源码设定异步检查 GitHub Releases 最新版本。该检查只访问 GitHub API、比较版本并弹出提示，不会自动下载或执行更新。
+需要提前知道的行为：
 
-当前更新源为：
+- 会读取前台窗口、任务栏和显示器状态。
+- 会临时调整当前用户的 Windows 壳层主题值，用来改善浅色任务栏下的托盘图标可见性。
+- 会临时同步 TranslucentTB 的最大化窗口外观，并在退出时恢复。
+- 会写本地诊断日志到 `%LOCALAPPDATA%\ImmersiveTopTaskbar\log.txt`。
+- 只有检查更新和自动下载安装包时会访问 GitHub。
 
-```cpp
-constexpr auto kUpdateOwner = L"J1ANGJIANG";
-constexpr auto kUpdateRepo = L"ImmersiveTopTaskbar";
+公开反馈问题时，请先检查日志内容，避免把窗口标题或本地路径发到 issue 里。
+
+## 构建
+
+需要 Windows 11 x64、MSVC Build Tools 或 Visual Studio C++ 桌面开发组件。
+
+```bat
+build.cmd
 ```
 
-## 运行
+运行：
 
 ```bat
 build\ImmersiveTopTaskbar.exe
 ```
 
-托盘菜单可用于检查更新、查看关于信息和退出。
-
-停止正在运行的实例：
+退出正在运行的实例：
 
 ```bat
 build\ImmersiveTopTaskbar.exe --quit
 ```
 
-异常退出后恢复 TranslucentTB 管理的外观：
+异常退出后恢复 TranslucentTB 外观：
 
 ```bat
 build\ImmersiveTopTaskbar.exe --restore-ttb
@@ -53,20 +81,12 @@ build\ImmersiveTopTaskbar.exe --restore-ttb
 build\ImmersiveTopTaskbar.exe --restore-shell-theme
 ```
 
-## 构建
+## 支持作者
 
-```bat
-build.cmd
-```
+如果这个小工具确实改善了你的桌面体验，可以在托盘菜单点击“检查更新”，然后选择“支持作者”。
 
-需要 MSVC Build Tools 或 Visual Studio，并安装 C++ 桌面开发组件。
+捐赠二维码嵌入在程序资源里，不会作为普通图片文件安装到用户目录。
 
-## 本地日志
+## License
 
-诊断日志写入：
-
-```text
-%LOCALAPPDATA%\ImmersiveTopTaskbar\log.txt
-```
-
-日志可能包含窗口标题、窗口类名、坐标、颜色、TranslucentTB 路径和时间信息。公开提交 issue 前请先检查和脱敏。
+MIT

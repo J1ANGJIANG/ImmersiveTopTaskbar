@@ -1,1 +1,3 @@
 #define IDI_MAIN_ICON 101
+#define IDR_DONATE_QR_1 201
+#define IDR_DONATE_QR_2 202

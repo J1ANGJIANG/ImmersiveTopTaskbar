@@ -1,0 +1,39 @@
+<svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ImmersiveTopTaskbar immersive taskbar preview">
+  <defs>
+    <linearGradient id="wallpaper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8fb9d9"/>
+      <stop offset="0.5" stop-color="#cfd7de"/>
+      <stop offset="1" stop-color="#f2f5f7"/>
+    </linearGradient>
+    <linearGradient id="window" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7fafc"/>
+      <stop offset="1" stop-color="#edf2f7"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#wallpaper)"/>
+  <rect y="0" width="1280" height="34" fill="#e8edf2" opacity="0.82"/>
+  <g transform="translate(512 8)">
+    <rect width="18" height="18" rx="4" fill="#2b9af3"/>
+    <rect x="28" width="18" height="18" rx="9" fill="#8b5cf6"/>
+    <rect x="56" width="18" height="18" rx="4" fill="#22c55e"/>
+    <rect x="84" width="18" height="18" rx="9" fill="#f97316"/>
+    <rect x="112" width="18" height="18" rx="4" fill="#ef4444"/>
+    <rect x="140" width="18" height="18" rx="9" fill="#0ea5e9"/>
+    <rect x="168" width="18" height="18" rx="4" fill="#64748b"/>
+    <rect x="196" width="18" height="18" rx="9" fill="#10b981"/>
+    <rect x="224" width="18" height="18" rx="4" fill="#f59e0b"/>
+  </g>
+  <text x="1085" y="22" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="14" fill="#3f4b5f">Wi-Fi  Battery  20:36</text>
+  <rect x="54" y="56" width="1172" height="612" rx="8" fill="url(#window)" stroke="#d6dee8"/>
+  <rect x="54" y="56" width="1172" height="48" rx="8" fill="#f8fafc"/>
+  <text x="82" y="87" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="17" font-weight="600" fill="#1f2937">Example App</text>
+  <circle cx="1156" cy="80" r="7" fill="#94a3b8"/>
+  <circle cx="1184" cy="80" r="7" fill="#94a3b8"/>
+  <circle cx="1212" cy="80" r="7" fill="#94a3b8"/>
+  <rect x="106" y="154" width="456" height="38" rx="6" fill="#dbeafe"/>
+  <rect x="106" y="218" width="812" height="22" rx="4" fill="#d9e2ec"/>
+  <rect x="106" y="256" width="734" height="22" rx="4" fill="#d9e2ec"/>
+  <rect x="106" y="294" width="632" height="22" rx="4" fill="#d9e2ec"/>
+  <rect x="106" y="374" width="1030" height="210" rx="8" fill="#ffffff" stroke="#d6dee8"/>
+  <text x="106" y="634" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="18" fill="#334155">Top taskbar follows the maximized window without covering your desktop.</text>
+</svg>

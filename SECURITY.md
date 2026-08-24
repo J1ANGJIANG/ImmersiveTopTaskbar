@@ -18,6 +18,8 @@ ImmersiveTopTaskbar:
 - 会在 `%LOCALAPPDATA%\ImmersiveTopTaskbar` 写入本地诊断日志；
 - 安装器默认安装到 `D:\ImmersiveTopTaskbar`；
 - 安装器默认勾选开机自动启动；
-- 启动后会检查配置的 GitHub Releases 最新版本。
+- 启动后会检查配置的 GitHub Releases 最新版本；
+- 用户主动选择时，可从 GitHub Release 下载新版安装包并启动安装器；
+- 捐赠二维码嵌入在程序资源中，不会作为普通图片文件安装到用户目录。
 
-程序不需要管理员权限，不会自动下载或执行更新。
+程序不需要管理员权限，不会静默安装更新。

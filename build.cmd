@@ -42,7 +42,7 @@ if %errorlevel% neq 0 (
 cl /nologo /std:c++20 /EHsc /O2 /W4 /utf-8 /DUNICODE /D_UNICODE ^
   /Fo"%OUT%\\" /Fe"%EXE%" ^
   "%ROOT%src\main.cpp" ^
-  user32.lib gdi32.lib shell32.lib dwmapi.lib ole32.lib oleaut32.lib advapi32.lib winhttp.lib ^
+  user32.lib gdi32.lib shell32.lib dwmapi.lib ole32.lib oleaut32.lib advapi32.lib winhttp.lib comctl32.lib gdiplus.lib ^
   /link /SUBSYSTEM:WINDOWS "%OUT%\app.res"
 
 exit /b %errorlevel%
