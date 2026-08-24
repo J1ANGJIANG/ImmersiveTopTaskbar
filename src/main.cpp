@@ -3836,6 +3836,108 @@ std::wstring ReleasesLatestUrl() {
     return std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest";
 }
 
+struct LatestReleaseInfo {
+    std::wstring tag;
+    std::wstring installerUrl;
+    std::wstring installerName;
+};
+
+std::wstring ReleaseTagFromLocation(std::wstring location) {
+    constexpr wchar_t marker[] = L"/releases/tag/";
+    const size_t pos = location.find(marker);
+    if (pos == std::wstring::npos) {
+        return {};
+    }
+    size_t start = pos + wcslen(marker);
+    size_t end = location.find_first_of(L"?#", start);
+    if (end == std::wstring::npos) {
+        end = location.size();
+    }
+    return location.substr(start, end - start);
+}
+
+std::wstring HttpRedirectLocation(const std::wstring &host, const std::wstring &path) {
+    HINTERNET session = WinHttpOpen(L"ImmersiveTopTaskbar/1.0",
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        return {};
+    }
+    HINTERNET conn = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!conn) {
+        WinHttpCloseHandle(session);
+        return {};
+    }
+    HINTERNET req = WinHttpOpenRequest(conn, L"GET", path.c_str(), nullptr,
+                                       WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       WINHTTP_FLAG_SECURE);
+    if (!req) {
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return {};
+    }
+
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    WinHttpSetOption(req, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+    WinHttpAddRequestHeaders(req, L"User-Agent: ImmersiveTopTaskbar\r\n",
+                             0xFFFFFFFF, WINHTTP_ADDREQ_FLAG_ADD);
+
+    std::wstring location;
+    BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (ok) {
+        ok = WinHttpReceiveResponse(req, nullptr);
+    }
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (ok) {
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    }
+    if (ok && status >= 300 && status < 400) {
+        DWORD size = 0;
+        if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                                 nullptr, &size, WINHTTP_NO_HEADER_INDEX) &&
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                                    buffer.data(), &size, WINHTTP_NO_HEADER_INDEX)) {
+                location.assign(buffer.data());
+            }
+        }
+    }
+
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    return location;
+}
+
+void FillInstallerInfoFromTag(LatestReleaseInfo &info) {
+    std::wstring version = info.tag;
+    if (!version.empty() && (version[0] == L'v' || version[0] == L'V')) {
+        version = version.substr(1);
+    }
+    info.installerName = L"ImmersiveTopTaskbar-Setup-" + version + L".exe";
+    info.installerUrl = std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo +
+                        L"/releases/download/" + info.tag + L"/" + info.installerName;
+}
+
+bool FetchLatestReleaseInfoFromRedirect(LatestReleaseInfo &info) {
+    const std::wstring location = HttpRedirectLocation(
+        L"github.com",
+        std::wstring(L"/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest");
+    std::wstring tag = ReleaseTagFromLocation(location);
+    if (tag.empty()) {
+        return false;
+    }
+    info.tag = tag;
+    FillInstallerInfoFromTag(info);
+    return true;
+}
+
 std::wstring RepositoryIssuesNewUrl(const std::wstring &body) {
     return std::wstring(L"https://github.com/") + kUpdateOwner + L"/" + kUpdateRepo +
            L"/issues/new?title=" + PercentEncodeUtf8(kFeedbackIssueTitle) +
@@ -3875,12 +3977,6 @@ std::wstring FetchLatestReleaseTag() {
     return Widen(tag);
 }
 
-struct LatestReleaseInfo {
-    std::wstring tag;
-    std::wstring installerUrl;
-    std::wstring installerName;
-};
-
 enum UpdateDialogAction {
     kUpdateDialogCancel = 0,
     kUpdateDialogAutoInstall = 1001,
@@ -3892,11 +3988,11 @@ bool FetchLatestReleaseInfo(LatestReleaseInfo &info) {
         std::wstring(L"/repos/") + kUpdateOwner + L"/" + kUpdateRepo + L"/releases/latest";
     const std::string json = HttpGetUtf8(L"api.github.com", path);
     if (json.empty()) {
-        return false;
+        return FetchLatestReleaseInfoFromRedirect(info);
     }
     std::string tag;
     if (!ExtractTagName(json, tag)) {
-        return false;
+        return FetchLatestReleaseInfoFromRedirect(info);
     }
     std::string assetName;
     std::string assetUrl;
@@ -3904,6 +4000,9 @@ bool FetchLatestReleaseInfo(LatestReleaseInfo &info) {
     info.tag = Widen(tag);
     info.installerName = Widen(assetName);
     info.installerUrl = Widen(assetUrl);
+    if (info.installerUrl.empty()) {
+        FillInstallerInfoFromTag(info);
+    }
     return !info.tag.empty();
 }
 
@@ -3932,6 +4031,30 @@ struct UpdateWindowState {
     int choice = kUpdateDialogCancel;
 };
 
+void AddRoundedRect(Gdiplus::GraphicsPath &path, Gdiplus::REAL x, Gdiplus::REAL y,
+                    Gdiplus::REAL width, Gdiplus::REAL height, Gdiplus::REAL radius) {
+    const Gdiplus::REAL d = radius * 2.0f;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + width - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + width - d, y + height - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + height - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+void FillRoundedRect(Gdiplus::Graphics &g, Gdiplus::Brush &brush, Gdiplus::REAL x, Gdiplus::REAL y,
+                     Gdiplus::REAL width, Gdiplus::REAL height, Gdiplus::REAL radius) {
+    Gdiplus::GraphicsPath path;
+    AddRoundedRect(path, x, y, width, height, radius);
+    g.FillPath(&brush, &path);
+}
+
+void StrokeRoundedRect(Gdiplus::Graphics &g, Gdiplus::Pen &pen, Gdiplus::REAL x, Gdiplus::REAL y,
+                       Gdiplus::REAL width, Gdiplus::REAL height, Gdiplus::REAL radius) {
+    Gdiplus::GraphicsPath path;
+    AddRoundedRect(path, x, y, width, height, radius);
+    g.DrawPath(&pen, &path);
+}
+
 LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_CREATE) {
         auto *cs = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -3939,21 +4062,21 @@ LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
 
         HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        const int buttonY = state->newer ? 466 : 466;
+        const int buttonY = 520;
         if (state->newer) {
             HWND autoButton = CreateWindowExW(0, L"BUTTON", L"下载更新",
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                             236, buttonY, 116, 32,
+                                             164, buttonY, 128, 34,
                                              hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogAutoInstall)),
                                              g_instance, nullptr);
             HWND githubButton = CreateWindowExW(0, L"BUTTON", L"去 GitHub 下载",
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                               364, buttonY, 128, 32,
+                                               304, buttonY, 140, 34,
                                                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogOpenGithub)),
                                                g_instance, nullptr);
             HWND cancelButton = CreateWindowExW(0, L"BUTTON", L"取消",
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                               504, buttonY, 82, 32,
+                                               456, buttonY, 88, 34,
                                                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogCancel)),
                                                g_instance, nullptr);
             EnableWindow(autoButton, state->canAutoInstall ? TRUE : FALSE);
@@ -3965,13 +4088,13 @@ LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
             if (state->fetchFailed) {
                 githubButton = CreateWindowExW(0, L"BUTTON", L"去 GitHub 查看",
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                               348, buttonY, 130, 32,
+                                               224, buttonY, 140, 34,
                                                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogOpenGithub)),
                                                g_instance, nullptr);
             }
             HWND closeButton = CreateWindowExW(0, L"BUTTON", L"关闭",
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | (state->fetchFailed ? 0 : BS_DEFPUSHBUTTON),
-                                              state->fetchFailed ? 492 : 466, buttonY, 94, 32,
+                                              state->fetchFailed ? 380 : 304, buttonY, 96, 34,
                                               hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateDialogCancel)),
                                               g_instance, nullptr);
             if (githubButton) {
@@ -3989,39 +4112,87 @@ LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.Clear(Gdiplus::Color(255, 248, 250, 252));
+        g.Clear(Gdiplus::Color(255, 246, 248, 251));
 
         RECT rc {};
         GetClientRect(hwnd, &rc);
         Gdiplus::FontFamily family(L"Microsoft YaHei UI");
-        Gdiplus::Font titleFont(&family, 22.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font titleFont(&family, 24.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
         Gdiplus::Font bodyFont(&family, 14.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::Font labelFont(&family, 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font captionFont(&family, 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 24, 31, 42));
         Gdiplus::SolidBrush bodyBrush(Gdiplus::Color(255, 70, 78, 92));
+        Gdiplus::SolidBrush mutedBrush(Gdiplus::Color(255, 106, 115, 130));
+        Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
+        Gdiplus::SolidBrush softBrush(Gdiplus::Color(255, 238, 242, 247));
+        Gdiplus::Pen borderPen(Gdiplus::Color(255, 224, 229, 236), 1.0f);
+        Gdiplus::Pen softBorderPen(Gdiplus::Color(255, 231, 235, 241), 1.0f);
         Gdiplus::StringFormat centered;
         centered.SetAlignment(Gdiplus::StringAlignmentCenter);
         centered.SetLineAlignment(Gdiplus::StringAlignmentNear);
 
         if (state) {
-            Gdiplus::RectF titleRect(24.0f, 24.0f, static_cast<Gdiplus::REAL>(rc.right - 48), 32.0f);
+            FillRoundedRect(g, whiteBrush, 28.0f, 22.0f, static_cast<Gdiplus::REAL>(rc.right - 56), 474.0f, 16.0f);
+            StrokeRoundedRect(g, borderPen, 28.0f, 22.0f, static_cast<Gdiplus::REAL>(rc.right - 56), 474.0f, 16.0f);
+
+            const wchar_t *pillText = state->fetchFailed ? L"网络状态" : (state->newer ? L"发现更新" : L"版本状态");
+            const Gdiplus::Color pillColor = state->fetchFailed
+                                                 ? Gdiplus::Color(255, 255, 247, 237)
+                                                 : (state->newer ? Gdiplus::Color(255, 239, 246, 255)
+                                                                 : Gdiplus::Color(255, 238, 248, 244));
+            Gdiplus::SolidBrush pillBrush(pillColor);
+            FillRoundedRect(g, pillBrush, 292.0f, 44.0f, 116.0f, 28.0f, 14.0f);
+            Gdiplus::RectF pillRect(292.0f, 49.0f, 116.0f, 20.0f);
+            g.DrawString(pillText, -1, &captionFont, pillRect, &centered, &mutedBrush);
+
+            Gdiplus::RectF titleRect(42.0f, 86.0f, static_cast<Gdiplus::REAL>(rc.right - 84), 34.0f);
             g.DrawString(state->title.c_str(), -1, &titleFont, titleRect, &centered, &titleBrush);
-            Gdiplus::RectF detailRect(36.0f, 62.0f, static_cast<Gdiplus::REAL>(rc.right - 72), 72.0f);
+            Gdiplus::RectF detailRect(74.0f, 126.0f, static_cast<Gdiplus::REAL>(rc.right - 148), 64.0f);
             g.DrawString(state->detail.c_str(), -1, &bodyFont, detailRect, &centered, &bodyBrush);
 
-            const int gap = 28;
-            const int qrSize = 210;
-            const int total = qrSize * 2 + gap;
+            Gdiplus::RectF donateTitle(0.0f, 203.0f, static_cast<Gdiplus::REAL>(rc.right), 24.0f);
+            g.DrawString(L"支持作者", -1, &labelFont, donateTitle, &centered, &titleBrush);
+
+            const int cardW = 226;
+            const int cardH = 252;
+            const int qrSize = 186;
+            const int gap = 32;
+            const int total = cardW * 2 + gap;
             const int left = std::max(24, (static_cast<int>(rc.right) - total) / 2);
-            const int top = 146;
+            const int top = 238;
+            FillRoundedRect(g, softBrush, static_cast<Gdiplus::REAL>(left + 4), static_cast<Gdiplus::REAL>(top + 6),
+                            static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+            FillRoundedRect(g, whiteBrush, static_cast<Gdiplus::REAL>(left), static_cast<Gdiplus::REAL>(top),
+                            static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+            StrokeRoundedRect(g, softBorderPen, static_cast<Gdiplus::REAL>(left), static_cast<Gdiplus::REAL>(top),
+                              static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+            const int rightCardLeft = left + cardW + gap;
+            FillRoundedRect(g, softBrush, static_cast<Gdiplus::REAL>(rightCardLeft + 4), static_cast<Gdiplus::REAL>(top + 6),
+                            static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+            FillRoundedRect(g, whiteBrush, static_cast<Gdiplus::REAL>(rightCardLeft), static_cast<Gdiplus::REAL>(top),
+                            static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+            StrokeRoundedRect(g, softBorderPen, static_cast<Gdiplus::REAL>(rightCardLeft), static_cast<Gdiplus::REAL>(top),
+                              static_cast<Gdiplus::REAL>(cardW), static_cast<Gdiplus::REAL>(cardH), 14.0f);
+
+            const int qrTop = top + 18;
+            const int qrLeft = left + (cardW - qrSize) / 2;
+            const int qrRightLeft = rightCardLeft + (cardW - qrSize) / 2;
             if (state->qr1) {
-                g.DrawImage(state->qr1, left, top, qrSize, qrSize);
+                g.DrawImage(state->qr1, qrLeft, qrTop, qrSize, qrSize);
             }
             if (state->qr2) {
-                g.DrawImage(state->qr2, left + qrSize + gap, top, qrSize, qrSize);
+                g.DrawImage(state->qr2, qrRightLeft, qrTop, qrSize, qrSize);
             }
-            Gdiplus::RectF hintRect(0.0f, static_cast<Gdiplus::REAL>(top + qrSize + 18),
-                                    static_cast<Gdiplus::REAL>(rc.right), 24.0f);
-            g.DrawString(L"二维码仅用于自愿支持，不影响任何功能。", -1, &bodyFont, hintRect, &centered, &bodyBrush);
+            Gdiplus::RectF alipayRect(static_cast<Gdiplus::REAL>(left), static_cast<Gdiplus::REAL>(top + 214),
+                                      static_cast<Gdiplus::REAL>(cardW), 24.0f);
+            Gdiplus::RectF wechatRect(static_cast<Gdiplus::REAL>(rightCardLeft), static_cast<Gdiplus::REAL>(top + 214),
+                                      static_cast<Gdiplus::REAL>(cardW), 24.0f);
+            g.DrawString(L"支付宝", -1, &labelFont, alipayRect, &centered, &titleBrush);
+            g.DrawString(L"微信", -1, &labelFont, wechatRect, &centered, &titleBrush);
+
+            Gdiplus::RectF hintRect(0.0f, 492.0f, static_cast<Gdiplus::REAL>(rc.right), 20.0f);
+            g.DrawString(L"自愿支持，不影响任何功能", -1, &captionFont, hintRect, &centered, &mutedBrush);
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -4040,11 +4211,7 @@ LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
-        if (state) {
-            delete state->qr1;
-            delete state->qr2;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return 0;
     default:
         break;
@@ -4093,8 +4260,8 @@ int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer, bool fetc
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        640,
-        550,
+        700,
+        610,
         g_window,
         nullptr,
         g_instance,
@@ -4118,6 +4285,8 @@ int ShowUpdateOptionsDialog(const LatestReleaseInfo &info, bool newer, bool fetc
         }
     }
     const int choice = state->choice;
+    delete state->qr1;
+    delete state->qr2;
     delete state;
     return choice;
 }
