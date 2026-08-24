@@ -6,6 +6,18 @@
 
 ImmersiveTopTaskbar 是一个面向 Windows 11 顶部任务栏的轻量沉浸工具。它会观察当前桌面窗口状态，在有窗口最大化时，把真实系统任务栏调整成更贴近窗口背景的视觉效果，让顶部任务栏不再像一条突兀的分割线。
 
+## 案例
+
+![桌面透明效果](docs/images/cases/case-desktop.png)
+
+![浅色窗口沉浸效果](docs/images/cases/case-light-pink.png)
+
+![暖色浅色窗口沉浸效果](docs/images/cases/case-light-warm.png)
+
+![深色窗口沉浸效果](docs/images/cases/case-dark.png)
+
+![彩色窗口沉浸效果](docs/images/cases/case-teal.png)
+
 ## 核心功能
 
 - **最大化窗口沉浸**
